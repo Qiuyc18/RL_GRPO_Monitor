@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 .python-version
+data/
 data/gpu_metrics.csv
 rl_llm.egg-info/
