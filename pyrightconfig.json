@@ -1,0 +1,19 @@
+{
+  "include": [
+    "."
+  ],
+  "extraPaths": [
+    "./ms-swift",
+    "ms-swift"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "./ms-swift"
+      ]
+    }
+  ]
+}
