@@ -1,19 +1,28 @@
 import atexit
+import csv
+import logging
 import os
 
 import gradio as gr
 import pandas as pd
+import plotly.graph_objects as go
 
 from monitor_gpu import GpuMonitor
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 # --- Configuration ---
-LOG_DIRECTORY = "data"
+LOG_DIRECTORY = "logs"
 GPU_LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, "gpu_metrics.csv")
+EVENTS_LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, "gpu_events.csv")
 MONITOR_INTERVAL_MS = 100
-UI_REFRESH_INTERVAL_SECONDS = 0.2
-BUFFER_SECONDS = 60
-DEFAULT_PLOT_WINDOW_POINTS = 300
-DEFAULT_MAX_GPUS = 8
+UI_REFRESH_INTERVAL_SECONDS = 0.5
+BUFFER_SECONDS = 3600
+DEFAULT_PLOT_WINDOW_SECONDS = 30
+DEFAULT_MAX_GPU_CHOICES = 8
+DEFAULT_EVENT_LIMIT = 200
+DEFAULT_MONITOR_INTERVAL_SECONDS = MONITOR_INTERVAL_MS / 1000
 
 # --- Setup ---
 os.makedirs(LOG_DIRECTORY, exist_ok=True)
@@ -24,6 +33,7 @@ monitor = GpuMonitor(
     interval=MONITOR_INTERVAL_MS / 1000,
     buffer_seconds=BUFFER_SECONDS,
     write_interval=1.0,
+    events_file_path=EVENTS_LOG_FILE_PATH,
 )
 monitor.start()
 
@@ -31,75 +41,186 @@ monitor.start()
 atexit.register(monitor.stop)
 
 
-def read_monitoring_data(window_points, max_gpus):
-    """
-    Reads the GPU log data and prepares it for the Gradio dashboard.
-    """
-    try:
-        rows = monitor.get_recent_rows(BUFFER_SECONDS)
-        if not rows:
-            return (
-                pd.DataFrame(
-                    columns=[
-                        "timestamp",
-                        "gpu_id",
-                        "gpu_utilization",
-                        "memory_utilization",
-                        "temperature",
-                    ]
-                ),
-                pd.DataFrame(columns=["timestamp", "gpu_id", "gpu_utilization"]),
-                pd.DataFrame(columns=["timestamp", "gpu_id", "memory_utilization"]),
+def _tail_lines(path, max_lines):
+    if max_lines <= 0:
+        return []
+    with open(path, "rb") as file:
+        file.seek(0, os.SEEK_END)
+        size = file.tell()
+        block = 4096
+        data = b""
+        while size > 0 and data.count(b"\n") <= max_lines:
+            step = min(block, size)
+            file.seek(size - step)
+            data = file.read(step) + data
+            size -= step
+    return data.splitlines()[-max_lines:]
+
+
+def _read_recent_events(limit):
+    if not os.path.exists(EVENTS_LOG_FILE_PATH):
+        return pd.DataFrame(columns=["timestamp", "event_type"])  # type: ignore
+    lines = _tail_lines(EVENTS_LOG_FILE_PATH, limit + 1)
+    if not lines:
+        return pd.DataFrame(columns=["timestamp", "event_type"])  # type: ignore
+    if lines[0].startswith(b"timestamp"):
+        lines = lines[1:]
+    rows = []
+    for row in csv.reader([line.decode("utf-8") for line in lines]):
+        if len(row) >= 2:
+            try:
+                ts = float(row[0])
+            except ValueError:
+                continue
+            rows.append({"timestamp": ts, "event_type": row[1]})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s").dt.round("ms")
+    return df
+
+
+def _build_usage_figure(df, y_key, title, events_df):
+    fig = go.Figure()
+    if not df.empty:
+        for gpu_id in sorted(df["gpu_id"].unique()):
+            gpu_df = df[df["gpu_id"] == gpu_id]
+            fig.add_trace(
+                go.Scatter(
+                    x=gpu_df["timestamp"],
+                    y=gpu_df[y_key],
+                    mode="lines",
+                    name=f"GPU {gpu_id}",
+                )
             )
+
+    if events_df is not None and not events_df.empty:
+        palette = [
+            "#e74c3c",
+            "#3498db",
+            "#2ecc71",
+            "#f39c12",
+            "#9b59b6",
+            "#1abc9c",
+            "#e67e22",
+            "#34495e",
+        ]
+        event_types = sorted(events_df["event_type"].unique())
+        color_map = {
+            event_type: palette[i % len(palette)]
+            for i, event_type in enumerate(event_types)
+        }
+        for event_type in event_types:
+            event_rows = events_df[events_df["event_type"] == event_type]
+            x_vals = []
+            y_vals = []
+            for ts in event_rows["timestamp"]:
+                x_vals.extend([ts, ts, None])
+                y_vals.extend([0, 100, None])
+            fig.add_trace(
+                go.Scatter(
+                    x=x_vals,
+                    y=y_vals,
+                    mode="lines",
+                    line=dict(color=color_map[event_type], dash="dot", width=1),
+                    name=event_type,
+                )
+            )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="时间",
+        yaxis_title="占用率（%）",
+        yaxis=dict(range=[0, 100]),
+        margin=dict(l=40, r=20, t=40, b=40),
+        legend=dict(orientation="h"),
+        width=1200,
+        height=300,
+    )
+    return fig
+
+
+def _empty_payload():
+    return (
+        pd.DataFrame(
+            columns=[  # type: ignore
+                "timestamp",
+                "gpu_id",
+                "gpu_utilization",
+                "memory_utilization",
+                "temperature",
+            ]
+        ),
+        pd.DataFrame(columns=["timestamp", "gpu_id", "gpu_utilization"]),  # type: ignore
+        pd.DataFrame(columns=["timestamp", "gpu_id", "memory_utilization"]),  # type: ignore
+    )
+
+
+def _normalize_gpu_ids(selected_gpu_ids):
+    if selected_gpu_ids is None:
+        return None
+    if not selected_gpu_ids:
+        return set()
+    return {str(gpu_id) for gpu_id in selected_gpu_ids}
+
+
+def _get_gpu_choices():
+    latest_rows = monitor.get_latest_snapshot()
+    if not latest_rows:
+        return [str(i) for i in range(DEFAULT_MAX_GPU_CHOICES)]
+    sorted_rows = sorted(latest_rows, key=lambda row: row["gpu_id"])
+    return [str(row["gpu_id"]) for row in sorted_rows]
+
+
+def read_monitoring_data(window_seconds, selected_gpu_ids, paused, last_state):
+    """
+    Reads the GPU log and prepares it for the Gradio dashboard.
+    """
+    if paused and last_state is not None:
+        return (*last_state, last_state)
+    try:
+        rows = monitor.get_recent_rows(window_seconds)
+        if not rows:
+            empty_payload = _empty_payload()
+            return (*empty_payload, empty_payload)
 
         rows_by_gpu = {}
         for row in rows:
-            rows_by_gpu.setdefault(row["gpu_id"], []).append(row)
+            rows_by_gpu.setdefault(str(row["gpu_id"]), []).append(row)
 
-        gpu_ids = sorted(rows_by_gpu.keys())
-        if max_gpus is not None and max_gpus > 0:
-            gpu_ids = gpu_ids[: int(max_gpus)]
+        selected_set = _normalize_gpu_ids(selected_gpu_ids)
+        if selected_set is None:
+            gpu_ids = sorted(rows_by_gpu.keys())
+        else:
+            gpu_ids = [
+                gpu_id
+                for gpu_id in sorted(rows_by_gpu.keys())
+                if gpu_id in selected_set
+            ]
 
         sampled_rows = []
         for gpu_id in gpu_ids:
-            gpu_rows = rows_by_gpu[gpu_id]
-            if window_points is not None and window_points > 0:
-                gpu_rows = gpu_rows[-int(window_points) :]
-            sampled_rows.extend(gpu_rows)
+            sampled_rows.extend(rows_by_gpu[gpu_id])
 
         if not sampled_rows:
-            return (
-                pd.DataFrame(
-                    columns=[
-                        "timestamp",
-                        "gpu_id",
-                        "gpu_utilization",
-                        "memory_utilization",
-                        "temperature",
-                    ]
-                ),
-                pd.DataFrame(columns=["timestamp", "gpu_id", "gpu_utilization"]),
-                pd.DataFrame(columns=["timestamp", "gpu_id", "memory_utilization"]),
-            )
+            empty_payload = _empty_payload()
+            return (*empty_payload, empty_payload)
 
         df = pd.DataFrame(sampled_rows)
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"], unit="s", format="%Y-%m-%d %H:%M:%S.%2f"
-        )
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s").dt.round("ms")
         df["gpu_id"] = df["gpu_id"].astype(str)
 
         latest_rows = monitor.get_latest_snapshot()
         if latest_rows:
-            summary_df = (
-                pd.DataFrame(latest_rows)
-                .sort_values("gpu_id")
-                .query("gpu_id in @gpu_ids")
-            )
-            summary_df["timestamp"] = pd.to_datetime(summary_df["timestamp"], unit="s")
+            summary_df = pd.DataFrame(latest_rows).sort_values("gpu_id")
+            summary_df["timestamp"] = pd.to_datetime(
+                summary_df["timestamp"], unit="s"
+            ).dt.round("ms")
             summary_df["gpu_id"] = summary_df["gpu_id"].astype(str)
+            if gpu_ids:
+                summary_df = summary_df[summary_df["gpu_id"].isin(gpu_ids)]
         else:
             summary_df = pd.DataFrame(
-                columns=[
+                columns=[  # type: ignore
                     "timestamp",
                     "gpu_id",
                     "gpu_utilization",
@@ -108,82 +229,116 @@ def read_monitoring_data(window_points, max_gpus):
                 ]
             )
 
-        gpu_df = df[["timestamp", "gpu_id", "gpu_utilization"]]
-        mem_df = df[["timestamp", "gpu_id", "memory_utilization"]]
+        events_df = _read_recent_events(DEFAULT_EVENT_LIMIT)
+        if not events_df.empty and not df.empty:
+            min_ts = df["timestamp"].min()
+            max_ts = df["timestamp"].max()
+            events_df = events_df[
+                (events_df["timestamp"] >= min_ts) & (events_df["timestamp"] <= max_ts)
+            ]
 
-        return summary_df, gpu_df, mem_df
+        gpu_fig = _build_usage_figure(df, "gpu_utilization", "GPU 占用率", events_df)
+        mem_fig = _build_usage_figure(df, "memory_utilization", "显存占用率", events_df)
+        payload = (summary_df, gpu_fig, mem_fig)
+        return (*payload, payload)
 
     except Exception:
-        return None, None, None
+        if last_state is not None:
+            return (*last_state, last_state)
+        empty_payload = _empty_payload()
+        return (*empty_payload, empty_payload)
 
 
 with gr.Blocks() as demo:
     gr.Markdown("## GPU 实时监控")
 
     with gr.Row():
-        window_points = gr.Slider(
-            minimum=50,
-            maximum=5000,
-            value=DEFAULT_PLOT_WINDOW_POINTS,
-            step=50,
-            label="绘图窗口（每 GPU 点数）",
-        )
-        max_gpus = gr.Slider(
-            minimum=1,
-            maximum=16,
-            value=DEFAULT_MAX_GPUS,
-            step=1,
-            label="最大显示 GPU 数",
-        )
-        refresh_interval = gr.Slider(
-            minimum=0.1,
-            maximum=2.0,
-            value=UI_REFRESH_INTERVAL_SECONDS,
-            step=0.1,
-            label="刷新间隔（秒）",
-        )
+        with gr.Column(scale=1, min_width=240):
+            window_seconds = gr.Slider(
+                minimum=5,
+                maximum=BUFFER_SECONDS,
+                value=DEFAULT_PLOT_WINDOW_SECONDS,
+                step=1,
+                label="最大绘图窗口（秒）",
+            )
+            refresh_interval = gr.Slider(
+                minimum=0.1,
+                maximum=2.0,
+                value=UI_REFRESH_INTERVAL_SECONDS,
+                step=0.1,
+                label="刷新间隔（秒）",
+            )
+            monitor_interval = gr.Slider(
+                minimum=0.05,
+                maximum=2.0,
+                value=DEFAULT_MONITOR_INTERVAL_SECONDS,
+                step=0.05,
+                label="采样间隔（秒）",
+            )
+            pause_state = gr.State(value=False)
+            pause_button = gr.Button(value="暂停刷新")
+            gpu_selector = gr.CheckboxGroup(
+                choices=_get_gpu_choices(),
+                value=_get_gpu_choices(),
+                label="展示 GPU",
+            )
 
-    summary_table = gr.Dataframe(
-        headers=[
-            "时间",
-            "GPU ID",
-            "GPU 使用率",
-            "显存使用率",
-            "温度",
-        ],
-        datatype=["datetime", "str", "number", "number", "number"],
-        label="当前 GPU 指标（每 GPU）",
-        interactive=False,
-    )
+        with gr.Column(scale=4):
+            summary_table = gr.Dataframe(
+                headers=[
+                    "时间",
+                    "GPU ID",
+                    "GPU 占用率",
+                    "显存占用率",
+                    "温度",
+                ],
+                datatype=["date", "str", "number", "number", "number"],
+                label="当前 GPU 指标（每 GPU）",
+                interactive=False,
+            )
 
-    gpu_history_plot = gr.LinePlot(
-        x="timestamp",
-        y="gpu_utilization",
-        color="gpu_id",
-        title="GPU 使用率历史",
-        y_lim=[0, 100],
-        tooltip=["timestamp", "gpu_id", "gpu_utilization"],
-    )
-    mem_history_plot = gr.LinePlot(
-        x="timestamp",
-        y="memory_utilization",
-        color="gpu_id",
-        title="显存使用率历史",
-        y_lim=[0, 100],
-        tooltip=["timestamp", "gpu_id", "memory_utilization"],
-    )
+            gpu_history_plot = gr.Plot(label="GPU 占用率历史")
+            mem_history_plot = gr.Plot(label="显存占用率历史")
+
+    last_state = gr.State(value=None)
+
+    # events_table = gr.Dataframe(
+    #     headers=["timestamp", "event_type"],
+    #     datatype=["date", "str"],
+    #     label="事件（最近N条）",
+    #     interactive=False,
+    # )
 
     # Use gr.Timer for periodic refresh
     timer = gr.Timer(value=UI_REFRESH_INTERVAL_SECONDS)
     timer.tick(
         fn=read_monitoring_data,
-        inputs=[window_points, max_gpus],
-        outputs=[summary_table, gpu_history_plot, mem_history_plot],
+        inputs=[window_seconds, gpu_selector, pause_state, last_state],
+        outputs=[
+            summary_table,
+            gpu_history_plot,
+            mem_history_plot,
+            #  events_table
+            last_state,
+        ],
+    )
+    pause_button.click(
+        fn=lambda paused: (
+            not paused,
+            gr.Button.update(value="恢复刷新" if not paused else "暂停刷新"),
+        ),
+        inputs=pause_state,
+        outputs=[pause_state, pause_button],
     )
     refresh_interval.change(
         fn=lambda interval: interval,
         inputs=refresh_interval,
         outputs=timer,
+    )
+    monitor_interval.change(
+        fn=lambda interval: monitor.update_interval(interval),
+        inputs=monitor_interval,
+        outputs=[],
     )
 
 if __name__ == "__main__":
