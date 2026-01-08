@@ -10,7 +10,7 @@
 ## Build, Test, and Development Commands
 - Run the monitoring UI locally:
   - `python app.py`
-  - Requires a Python 3.12 environment with `gradio`, `pandas`, and `pynvml`.
+  - Requires a Python 3.12 environment with `gradio`, `pandas`, `amdsmi` if AMD or `pynvml` if NVIDIA.
 - Run ms-swift’s bundled test runner (GPU-heavy):
   - `python ms-swift/tests/run.py`
 - Targeted tests (if dependencies are installed):
