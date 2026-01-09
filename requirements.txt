@@ -1,0 +1,8 @@
+gradio
+pandas
+plotly
+amdsmi  # for AMD GPU monitoring
+nvidia-ml-py  # for NVIDIA GPU monitoring
+transformers
+accelerate
+huggingface_hub
