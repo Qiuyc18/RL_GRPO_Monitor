@@ -1,7 +1,25 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 from pathlib import Path
+from textwrap import dedent
+
+# --- 文档说明 ---
+DESCRIPTION_TEXT = dedent("""\
+    [常用命令示例]
+    1. 搜索模型:
+       python download.py search Qwen --limit 20
+    2. 下载模型 (默认下载到 ./models/，没有会创建):
+       python download.py download Qwen/Qwen2.5-1.5B-Instruct
+    3. 指定目录下载 (推荐部署流程):
+       # 下载到临时目录
+       python download.py download Qwen/Qwen2.5-1.5B-Instruct --local-dir tmp
+       # 移动到公共目录
+       sudo mv tmp /etc/moreh/checkpoint/Qwen/Qwen2.5-1.5B-Instruct
+       # (可选) 创建只读软链接到当前目录，请确保 ./models 目录存在
+       ln -s /etc/moreh/checkpoint/Qwen ./models/
+    """)
 
 
 def _read_env_token(env_path: Path) -> str | None:
@@ -19,7 +37,9 @@ def _read_env_token(env_path: Path) -> str | None:
     return None
 
 
-def _get_token() -> str | None:
+def _get_token(token: str | None = None) -> str | None:
+    if token:
+        return token
     repo_root = Path(__file__).resolve().parents[1]
     token = _read_env_token(repo_root / ".env")
     if token:
@@ -49,42 +69,74 @@ def _cmd_download(args: argparse.Namespace) -> int:
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
-        print("Missing dependency: huggingface_hub. Please install it first.")
+        print("错误: 缺少依赖库 huggingface_hub。请先运行: pip install huggingface_hub")
         return 1
 
-    token = _get_token()
-    local_dir = args.local_dir
-    if local_dir is None:
-        local_dir = str(Path("models") / args.model_id)
-    os.makedirs(local_dir, exist_ok=True)
+    token = _get_token(args.token)
 
-    snapshot_download(
-        repo_id=args.model_id,
-        revision=args.revision,
-        local_dir=local_dir,
-        local_dir_use_symlinks=False,
-        resume_download=True,
-        token=token,
-    )
-    print(f"Downloaded to: {local_dir}")
-    return 0
+    # 路径处理逻辑
+    if args.local_dir:
+        local_dir = str(Path(args.local_dir))
+    else:
+        # 默认行为：下载到当前目录下的 models/Author/ModelName
+        local_dir = str(Path("models") / args.model_id)
+
+    print(f"准备下载: {args.model_id}")
+    print(f"目标路径: {local_dir}")
+    if token:
+        print("状态: 使用已认证 Token")
+    else:
+        print("状态: 未检测到 Token，尝试匿名下载...")
+
+    try:
+        snapshot_download(
+            repo_id=args.model_id,
+            revision=args.revision,
+            local_dir=local_dir,
+            local_dir_use_symlinks=False,  # 建议设为 False 以获得完整的物理文件
+            resume_download=True,
+            token=token,
+            # max_workers=8, # 如果服务器网络好，可以开启多线程下载
+        )
+        print(f"\n[成功] 模型已下载至: {os.path.abspath(local_dir)}")
+        return 0
+    except Exception as e:
+        print(f"\n[失败] 下载出错: {e}")
+        if "401" in str(e) or "403" in str(e):
+            print("提示: 此模型可能需要权限认证。请提供有效的 HF_TOKEN。")
+        return 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Hugging Face model utility.")
+    parser = argparse.ArgumentParser(
+        description=DESCRIPTION_TEXT,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # 全局参数
+    parser.add_argument(
+        "--token",
+        help="HuggingFace Token (可选，也可以通过环境变量设置）",
+        default=None,
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    search_parser = subparsers.add_parser("search", help="Search models by keyword.")
-    search_parser.add_argument("query", help="Search keyword, e.g. Qwen")
-    search_parser.add_argument("--limit", type=int, default=20)
+    # Search 命令
+    search_parser = subparsers.add_parser("search", help="按关键词搜索模型")
+    search_parser.add_argument("query", help="搜索关键词, 例如: Qwen")
+    search_parser.add_argument("--limit", type=int, default=20, help="显示结果数量限制")
     search_parser.set_defaults(func=_cmd_search)
 
-    download_parser = subparsers.add_parser("download", help="Download a model by ID.")
+    # Download 命令
+    download_parser = subparsers.add_parser("download", help="下载指定模型")
     download_parser.add_argument(
-        "model_id", help="Model ID, e.g. Qwen/Qwen2.5-1.5B-Instruct"
+        "model_id", help="模型 ID, 例如: Qwen/Qwen2.5-1.5B-Instruct"
     )
-    download_parser.add_argument("--revision", default=None)
-    download_parser.add_argument("--local-dir", default=None)
+    download_parser.add_argument(
+        "--revision", default=None, help="模型分支或 Commit ID"
+    )
+    download_parser.add_argument("--local-dir", default=None, help="下载目标路径")
     download_parser.set_defaults(func=_cmd_download)
 
     args = parser.parse_args()
@@ -92,4 +144,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n操作已取消。")
+        sys.exit(1)

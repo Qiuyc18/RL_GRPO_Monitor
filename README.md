@@ -18,6 +18,27 @@
 
 - 新建文件 `.env` ，在 `.env` 中更新 HuggingFace Token
 
+## 下载模型
+
+```bash
+# 搜索模型
+python download.py search Qwen --limit 20
+
+# 下载模型（默认保存到 ./models/）
+python download.py download Qwen/Qwen2.5-1.5B-Instruct
+```
+
+**服务器方式部署（推荐）：**
+```bash
+# 1. 下载到临时目录
+python download.py download Qwen/Qwen2.5-1.5B-Instruct --local-dir tmp
+
+# 2. 移动到统一存放的目录
+sudo mv tmp /etc/moreh/checkpoint/Qwen/Qwen2.5-1.5B-Instruct
+
+# 3. 创建软链接
+ln -s /etc/moreh/checkpoint/Qwen ./models/
+```
 
 ## 当前进度
 - 支持 NVIDIA / AMD SMI 采样、内存缓冲与 CSV 日志
