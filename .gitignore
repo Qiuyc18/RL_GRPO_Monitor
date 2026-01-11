@@ -3,6 +3,7 @@ __pycache__/
 .python-version
 .env
 .venv
+.tmp_amdsmi_src/
 
 models/
 data/

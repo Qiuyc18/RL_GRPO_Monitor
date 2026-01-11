@@ -7,7 +7,7 @@ import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
 
-from monitor_gpu import GpuMonitor
+from monitor import Monitor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -28,7 +28,8 @@ DEFAULT_MONITOR_INTERVAL_SECONDS = MONITOR_INTERVAL_MS / 1000
 os.makedirs(LOG_DIRECTORY, exist_ok=True)
 
 # Instantiate and start the GPU monitor in the background.
-monitor = GpuMonitor(
+monitor = Monitor(
+    platform="amd",
     output_file_path=GPU_LOG_FILE_PATH,
     interval=MONITOR_INTERVAL_MS / 1000,
     buffer_seconds=BUFFER_SECONDS,
@@ -325,7 +326,7 @@ with gr.Blocks() as demo:
     pause_button.click(
         fn=lambda paused: (
             not paused,
-            gr.Button.update(value="恢复刷新" if not paused else "暂停刷新"),
+            gr.update(value="恢复刷新" if not paused else "暂停刷新"),
         ),
         inputs=pause_state,
         outputs=[pause_state, pause_button],
