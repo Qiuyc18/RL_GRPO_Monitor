@@ -1,0 +1,5 @@
+--index-url https://download.pytorch.org/whl/rocm6.0
+-r requirements-common.txt
+torch
+torchvision
+torchaudio

@@ -1,0 +1,10 @@
+gradio
+pandas
+plotly
+dotenv
+amdsmi
+nvidia-ml-py
+transformers
+accelerate
+huggingface_hub
+-e .

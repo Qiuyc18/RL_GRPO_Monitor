@@ -13,21 +13,11 @@ fi
 
 echo "Init environment using uv..."
 uv venv --python 3.12
+source .venv/bin/activate
 
-case $PLATFORM in
-    "nvidia")
-        uv pip install torch torchvision torchaudio
-        ;;
-    "amd")
-        # for MI250X, recommend using ROCm 6.0 or 6.2
-        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.0
-        ;;
-    "cpu")
-        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        ;;
-esac
+REQUIREMENTS_FILE="requirements/requirements-${PLATFORM}.txt"
 
-uv pip install -r requirements.txt
-uv pip install -e .
+echo "Installing dependencies from $REQUIREMENTS_FILE using uv..."
+uv pip sync -r "$REQUIREMENTS_FILE"
 
 echo "Installation complete for $PLATFORM platform."
