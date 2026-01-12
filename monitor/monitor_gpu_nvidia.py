@@ -50,3 +50,6 @@ class NVIDIAMonitor:
                 }
             )
         return rows
+
+    def get_gpu_choices(self):
+        return [str(i) for i in range(nvmlDeviceGetCount())]

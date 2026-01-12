@@ -9,9 +9,16 @@ if __name__ == "__main__" and __package__ is None:
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from monitor.monitor_gpu_amd import AMDMonitor
-from monitor.monitor_gpu_nvidia import NVIDIAMonitor
+import dotenv
+dotenv.load_dotenv()
 
+PLATFORM = os.getenv("PLATFORM", "nvidia")
+if PLATFORM == "amd":
+    from monitor.monitor_gpu_amd import AMDMonitor
+elif PLATFORM == "nvidia":
+    from monitor.monitor_gpu_nvidia import NVIDIAMonitor
+else:
+    raise ValueError(f"Unsupported platform: {PLATFORM}")
 
 class Monitor:
     def __init__(
@@ -187,6 +194,10 @@ class Monitor:
                 row.copy() for row in self._metrics_buffer if row["timestamp"] >= cutoff
             ]
 
+    def get_gpu_choices(self):
+        with self._lock:
+            return self._collector.get_gpu_choices()
+        
     def get_latest_snapshot(self):
         with self._lock:
             return [row.copy() for row in self._latest_by_gpu.values()]
@@ -220,3 +231,10 @@ class Monitor:
             return rows[-int(limit) :]
         return rows
 
+
+if __name__ == "__main__":
+    monitor = Monitor(platform="nvidia", output_file_path="test.csv", interval=0.01, buffer_seconds=3600, write_interval=1.0, events_file_path="test_events.csv", enable_metrics=True)
+    monitor.start()
+    time.sleep(1)
+    print(monitor.get_gpu_choices())
+    monitor.stop()

@@ -10,3 +10,5 @@ data/
 logs/
 results/
 rl_llm.egg-info/
+
+uv.lock

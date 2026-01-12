@@ -106,3 +106,6 @@ class AMDMonitor:
                 }
             )
         return rows
+
+    def get_gpu_choices(self):
+        return [str(i) for i in range(len(self._handles))]

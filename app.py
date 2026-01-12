@@ -2,6 +2,7 @@ import atexit
 import csv
 import logging
 import os
+import dotenv
 
 import gradio as gr
 import pandas as pd
@@ -9,10 +10,13 @@ import plotly.graph_objects as go
 
 from monitor import Monitor
 
+dotenv.load_dotenv()
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 # --- Configuration ---
+PLATFORM = os.getenv("PLATFORM", "nvidia")
 LOG_DIRECTORY = "logs"
 GPU_LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, "gpu_metrics.csv")
 EVENTS_LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, "gpu_events.csv")
@@ -29,7 +33,7 @@ os.makedirs(LOG_DIRECTORY, exist_ok=True)
 
 # Instantiate and start the GPU monitor in the background.
 monitor = Monitor(
-    platform="amd",
+    platform=PLATFORM,
     output_file_path=GPU_LOG_FILE_PATH,
     interval=MONITOR_INTERVAL_MS / 1000,
     buffer_seconds=BUFFER_SECONDS,
@@ -165,11 +169,10 @@ def _normalize_gpu_ids(selected_gpu_ids):
 
 
 def _get_gpu_choices():
-    latest_rows = monitor.get_latest_snapshot()
-    if not latest_rows:
+    gpu_list = monitor.get_gpu_choices()
+    if not gpu_list:
         return [str(i) for i in range(DEFAULT_MAX_GPU_CHOICES)]
-    sorted_rows = sorted(latest_rows, key=lambda row: row["gpu_id"])
-    return [str(row["gpu_id"]) for row in sorted_rows]
+    return gpu_list
 
 
 def read_monitoring_data(window_seconds, selected_gpu_ids, paused, last_state):
@@ -281,7 +284,7 @@ with gr.Blocks() as demo:
             gpu_selector = gr.CheckboxGroup(
                 choices=_get_gpu_choices(),
                 value=_get_gpu_choices(),
-                label="展示 GPU",
+                label="GPU 列表",
             )
 
         with gr.Column(scale=4):
