@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
+import dotenv
+
+dotenv.load_dotenv()
+
 # --- 文档说明 ---
 DESCRIPTION_TEXT = dedent("""\
     [常用命令示例]
@@ -41,7 +45,9 @@ def _get_token(token: str | None = None) -> str | None:
     if token:
         return token
     repo_root = Path(__file__).resolve().parents[1]
-    token = _read_env_token(repo_root / ".env")
+    token = _read_env_token(repo_root / ".env") or os.environ.get(
+        "HUGGINGFACE_API_TOKEN"
+    )
     if token:
         return token
     return (
@@ -99,7 +105,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
         }
         if args.revision is not None:
             download_kwargs["revision"] = args.revision
-        snapshot_download(**download_kwargs) 
+        snapshot_download(**download_kwargs)
         print(f"\n[成功] 模型已下载至: {os.path.abspath(local_dir)}")
         return 0
     except Exception as e:
