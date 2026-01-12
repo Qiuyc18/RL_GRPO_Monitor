@@ -18,6 +18,6 @@ source .venv/bin/activate
 REQUIREMENTS_FILE="requirements/requirements-${PLATFORM}.txt"
 
 echo "Installing dependencies from $REQUIREMENTS_FILE using uv..."
-uv pip sync -r "$REQUIREMENTS_FILE"
+uv pip sync "$REQUIREMENTS_FILE"
 
 echo "Installation complete for $PLATFORM platform."

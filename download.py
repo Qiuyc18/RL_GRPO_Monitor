@@ -89,15 +89,17 @@ def _cmd_download(args: argparse.Namespace) -> int:
         print("状态: 未检测到 Token，尝试匿名下载...")
 
     try:
-        snapshot_download(
-            repo_id=args.model_id,
-            revision=args.revision,
-            local_dir=local_dir,
-            local_dir_use_symlinks=False,  # 建议设为 False 以获得完整的物理文件
-            resume_download=True,
-            token=token,
-            # max_workers=8, # 如果服务器网络好，可以开启多线程下载
-        )
+        download_kwargs = {
+            "repo_id": args.model_id,
+            "local_dir": local_dir,
+            "local_dir_use_symlinks": False,
+            "resume_download": True,
+            "token": token,
+            "max_workers": 8,
+        }
+        if args.revision is not None:
+            download_kwargs["revision"] = args.revision
+        snapshot_download(**download_kwargs) 
         print(f"\n[成功] 模型已下载至: {os.path.abspath(local_dir)}")
         return 0
     except Exception as e:
