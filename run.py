@@ -1,17 +1,15 @@
+import functools
 import os
 import sys
-import functools
-import threading
-import time
 
 sys.path.insert(0, os.path.abspath("./ms-swift"))
 
 from swift.llm import RLHFArguments, rlhf_main
-from macro import Event
-
-from monitor.monitor import Monitor
-from swift.utils.env import get_dist_setting
 from swift.trainers.rlhf_trainer import GRPOTrainer
+from swift.utils.env import get_dist_setting
+
+from macro import Event
+from monitor.monitor import Monitor
 
 # --- Configuration ---
 PLATFORM = os.getenv("PLATFORM", "nvidia")
@@ -26,6 +24,7 @@ DEFAULT_MAX_GPU_CHOICES = 8
 DEFAULT_EVENT_LIMIT = 200
 DEFAULT_MONITOR_INTERVAL_SECONDS = MONITOR_INTERVAL_MS / 1000
 
+
 def monkey_patch(monitor: Monitor | None):
     """Wrap GRPOTrainer to inject monitor."""
     target_method = "_generate_and_score_completions"
@@ -39,7 +38,9 @@ def monkey_patch(monitor: Monitor | None):
         if monitor:
             monitor.add_event(Event.INFERENCE_START)
 
-        result = getattr(GRPOTrainer, f"_original_{target_method}")(self, *args, **kwargs)
+        result = getattr(GRPOTrainer, f"_original_{target_method}")(
+            self, *args, **kwargs
+        )
 
         # [EVENT: 生成结束]
         if monitor:
@@ -66,21 +67,21 @@ def monkey_patch(monitor: Monitor | None):
 
 def main():
     rank, local_rank, world_size, local_world_size = get_dist_setting()
-    is_master = (rank == 0)     # Use GPU:0 for monitoring
+    is_master = rank == 0  # Use GPU:0 for monitoring
 
     # Start monitoring
     monitor = None
     if is_master:
         output_dir = "logs/grpo_experiment_v1"
         os.makedirs(output_dir, exist_ok=True)
-        
+
         print(f"[System] Starting Custom GPU Monitor on GPU: {local_rank}...")
         monitor = Monitor(
             platform="nvidia",
             output_file_path=os.path.join(output_dir, "gpu_metrics.csv"),
             events_file_path=os.path.join(output_dir, "gpu_events.csv"),
             interval=DEFAULT_MONITOR_INTERVAL_SECONDS,
-            enable_metrics=True 
+            enable_metrics=True,
         )
         monitor.start()
 
@@ -98,43 +99,54 @@ def main():
             "overlap_comm": True,
             "reduce_scatter": True,
             "reduce_bucket_size": 5e8,
-            "contiguous_gradients": True
+            "contiguous_gradients": True,
         },
         "gradient_accumulation_steps": "auto",
         "train_batch_size": "auto",
         "train_micro_batch_size_per_gpu": "auto",
         "gradient_clipping": "auto",
-        "fp16": {
-            "enabled": "auto"
-        },
-        "bf16": {
-            "enabled": "auto"
-        }
+        "fp16": {"enabled": "auto"},
+        "bf16": {"enabled": "auto"},
     }
 
     # Build arguments
     args = RLHFArguments(
-        model='models/Qwen/Qwen2.5-1.5B-Instruct',
-        rlhf_type='grpo',
-        output_dir='output/grpo_experiment_v1',
-        dataset=['/path/to/your/dataset'],
-        
+        rlhf_type="grpo",
+        model="models/Qwen/Qwen2.5-1.5B-Instruct",
+        reward_funcs="accuracy",
+        use_vllm=True,
+        vllm_mode="server",
+        vllm_server_host="127.0.0.1",
+        vllm_server_port=8000,
+        train_type="full",
+        torch_dtype="bfloat16",
+        dataset="AI-MO/NuminaMath-TIR#1000",
+        output_dir="output/grpo_experiment_v1",
         # Training hyperparameters
-        num_train_epochs=1,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,
+        load_from_cache_file=True,
+        split_dataset_ratio=0,
+        num_train_epochs=3,
+        per_device_train_batch_size=2,
         learning_rate=1e-6,
+        gradient_accumulation_steps=2,
+        save_total_limit=2,
         logging_steps=1,
-        
+        warmup_ratio=0.05,
+        dataloader_num_workers=4,
+        dataset_num_proc=4,
+        report_to="tensorboard",
+        beta=0.04,
         # GRPO specific parameters
-        num_generations=4, # Group Size
-        max_completion_length=512,
-        
+        num_generations=8,  # Group Size
+        temperature=1.0,
+        top_p=0.9,
+        top_k=50,
         # Memory optimization
+        max_completion_length=2048,
         deepspeed=ds_config_dict,
+        num_iterations=1,
     )
 
-    
     # Start training
     try:
         rlhf_main(args)
@@ -145,6 +157,7 @@ def main():
         if monitor:
             print(f"[System] Stopping Monitor on GPU: {local_rank}...")
             monitor.stop()
+
 
 if __name__ == "__main__":
     main()
