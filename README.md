@@ -18,6 +18,11 @@
 
 - 新建文件 `.env` ，在 `.env` 中更新 HuggingFace Token
 
+- 下载子模块
+    ```bash
+    git submodule update --init --recursive
+    ```
+
 ## 下载模型
 
 ```bash
