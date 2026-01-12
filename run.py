@@ -1,10 +1,11 @@
+import argparse
 import functools
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath("./ms-swift"))
 
-from swift.llm import RLHFArguments, rlhf_main
+from swift.llm import RLHFArguments, RolloutArguments, rlhf_main, rollout_main
 from swift.trainers.rlhf_trainer import GRPOTrainer
 from swift.utils.env import get_dist_setting
 
@@ -16,7 +17,7 @@ PLATFORM = os.getenv("PLATFORM", "nvidia")
 LOG_DIRECTORY = "logs"
 GPU_LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, "gpu_metrics.csv")
 EVENTS_LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, "gpu_events.csv")
-MONITOR_INTERVAL_MS = 100
+MONITOR_INTERVAL_MS = 10
 UI_REFRESH_INTERVAL_SECONDS = 0.5
 BUFFER_SECONDS = 3600
 DEFAULT_PLOT_WINDOW_SECONDS = 30
@@ -24,6 +25,7 @@ DEFAULT_MAX_GPU_CHOICES = 8
 DEFAULT_EVENT_LIMIT = 200
 DEFAULT_MONITOR_INTERVAL_SECONDS = MONITOR_INTERVAL_MS / 1000
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 def monkey_patch(monitor: Monitor | None):
     """Wrap GRPOTrainer to inject monitor."""
@@ -65,17 +67,72 @@ def monkey_patch(monitor: Monitor | None):
     GRPOTrainer.training_step = patched_step
 
 
-def main():
+# --- Configuration ---
+MODEL_PATH = "models/Qwen/Qwen3-0.6B"
+# MODEL_PATH = "models/Qwen/Qwen2.5-1.5B-Instruct"
+VLLM_SERVER_PORT = 8000
+VLLM_SERVER_HOST = "127.0.0.1"
+
+
+def start_rollout_server():
+    """启动 vLLM rollout 服务器（使用 GPU 0）"""
+    # 设置只使用 GPU 0
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    
+    print(f"[System] Starting vLLM rollout server on GPU 0...")
+    print(f"[System] Model: {MODEL_PATH}")
+    print(f"[System] Port: {VLLM_SERVER_PORT}")
+    print(f"[System] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+    
+    rollout_args = RolloutArguments(
+        model=MODEL_PATH,
+        port=VLLM_SERVER_PORT,
+        torch_dtype="float16",
+        # vllm_tensor_parallel_size=1,
+        # vllm_data_parallel_size=1,
+    )
+    
+    # 启动服务器并保持运行
+    rollout_main(rollout_args)
+
+
+def start_grpo_training():
+    """启动 GRPO 训练（使用除 GPU 0 外的其他 GPU）"""
+    # 获取所有 GPU 数量，排除 GPU 0，使用其他 GPU
+    # 注意：这里需要先初始化 NVML 来获取 GPU 数量
+    try:
+        from pynvml import nvmlInit, nvmlDeviceGetCount, nvmlShutdown
+        nvmlInit()
+        total_gpus = nvmlDeviceGetCount()
+        nvmlShutdown()
+        
+        # 排除 GPU 0，使用其他所有 GPU
+        if total_gpus > 1:
+            other_gpus = ','.join(str(i) for i in range(1, total_gpus))
+            os.environ['CUDA_VISIBLE_DEVICES'] = other_gpus
+            print(f"[System] Using GPUs: {other_gpus} (excluding GPU 0 for rollout server)")
+        else:
+            print(f"[Warning] Only 1 GPU available. GRPO training will use GPU 0, which may conflict with rollout server.")
+            os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    except Exception as e:
+        print(f"[Warning] Failed to detect GPU count: {e}. Using default GPU allocation.")
+        # 如果检测失败，默认使用 GPU 1,2,3（假设至少有 4 个 GPU）
+        os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+    
     rank, local_rank, world_size, local_world_size = get_dist_setting()
-    is_master = rank == 0  # Use GPU:0 for monitoring
+    print(f"[System] Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}, Local World Size: {local_world_size}")
+    is_master = rank == 0
 
     # Start monitoring
+    # 注意：Monitor 会监控所有物理 GPU（不受 CUDA_VISIBLE_DEVICES 影响）
+    # 它会通过 NVML 直接访问所有 GPU，所以可以看到 GPU 0（rollout 使用）和其他 GPU（训练使用）
     monitor = None
     if is_master:
         output_dir = "logs/grpo_experiment_v1"
         os.makedirs(output_dir, exist_ok=True)
 
-        print(f"[System] Starting Custom GPU Monitor on GPU: {local_rank}...")
+        print(f"[System] Starting Custom GPU Monitor...")
+        print(f"[System] Monitor will track ALL physical GPUs (including GPU 0 used by rollout server)")
         monitor = Monitor(
             platform="nvidia",
             output_file_path=os.path.join(output_dir, "gpu_metrics.csv"),
@@ -95,10 +152,10 @@ def main():
         "zero_optimization": {
             "stage": 2,
             "allgather_partitions": True,
-            "allgather_bucket_size": 5e8,
+            "allgather_bucket_size": 2e8,
             "overlap_comm": True,
             "reduce_scatter": True,
-            "reduce_bucket_size": 5e8,
+            "reduce_bucket_size": 2e8,
             "contiguous_gradients": True,
         },
         "gradient_accumulation_steps": "auto",
@@ -109,45 +166,51 @@ def main():
         "bf16": {"enabled": "auto"},
     }
 
-    # Build arguments
+    # Build training arguments
     args = RLHFArguments(
         rlhf_type="grpo",
-        model="models/Qwen/Qwen2.5-1.5B-Instruct",
-        reward_funcs="accuracy",
+        model=MODEL_PATH,
+        reward_funcs=["accuracy"],
         use_vllm=True,
         vllm_mode="server",
-        vllm_server_host="127.0.0.1",
-        vllm_server_port=8000,
+        vllm_server_host=[VLLM_SERVER_HOST],
+        vllm_server_port=[VLLM_SERVER_PORT],
         train_type="full",
-        torch_dtype="bfloat16",
-        dataset="AI-MO/NuminaMath-TIR#1000",
+        torch_dtype="float16",
+        device_map=None,
+        dataset=["AI-MO/NuminaMath-TIR#1000"],
         output_dir="output/grpo_experiment_v1",
         # Training hyperparameters
         load_from_cache_file=True,
         split_dataset_ratio=0,
-        num_train_epochs=3,
-        per_device_train_batch_size=2,
+        num_train_epochs=1,
+        per_device_train_batch_size=1,
         learning_rate=1e-6,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=8,
+        gradient_checkpointing=True,
         save_total_limit=2,
         logging_steps=1,
         warmup_ratio=0.05,
         dataloader_num_workers=4,
         dataset_num_proc=4,
-        report_to="tensorboard",
+        report_to=["tensorboard"],
         beta=0.04,
         # GRPO specific parameters
-        num_generations=8,  # Group Size
+        num_generations=2,  # Group Size
         temperature=1.0,
         top_p=0.9,
         top_k=50,
         # Memory optimization
-        max_completion_length=2048,
+        max_completion_length=512,
+        max_length=1024,
         deepspeed=ds_config_dict,
+        # deepspeed="zero2",
         num_iterations=1,
     )
 
     # Start training
+    print(f"[System] Connecting to vLLM server at {VLLM_SERVER_HOST}:{VLLM_SERVER_PORT}...")
+    print(f"[System] Starting GRPO training...")
     try:
         rlhf_main(args)
     except Exception as e:
@@ -157,6 +220,41 @@ def main():
         if monitor:
             print(f"[System] Stopping Monitor on GPU: {local_rank}...")
             monitor.stop()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="GRPO Training Script with vLLM Support",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Terminal 1: Start vLLM server
+  python run.py --rollout
+
+  # Terminal 2: Start training
+  python run.py --grpo
+        """,
+    )
+    parser.add_argument(
+        "--rollout",
+        action="store_true",
+        help="Start vLLM rollout server (run in a separate terminal)",
+    )
+    parser.add_argument(
+        "--grpo",
+        action="store_true",
+        help="Start GRPO training (requires vLLM server to be running)",
+    )
+
+    args = parser.parse_args()
+
+    if args.rollout:
+        start_rollout_server()
+    elif args.grpo:
+        start_grpo_training()
+    else:
+        parser.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
