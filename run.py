@@ -71,27 +71,7 @@ def start_rollout_server():
 
 
 def start_grpo_training(log_dir="logs/grpo_experiment"):
-    """启动 GRPO 训练（使用除 GPU 0 外的其他 GPU）"""
-    # 获取所有 GPU 数量，排除 GPU 0，使用其他 GPU
-    # 注意：这里需要先初始化 NVML 来获取 GPU 数量
-    try:
-        from pynvml import nvmlInit, nvmlDeviceGetCount, nvmlShutdown
-        nvmlInit()
-        total_gpus = nvmlDeviceGetCount()
-        nvmlShutdown()
-        
-        # 排除 GPU 0，使用其他所有 GPU
-        if total_gpus > 1:
-            other_gpus = ','.join(str(i) for i in range(1, total_gpus))
-            os.environ['CUDA_VISIBLE_DEVICES'] = other_gpus
-            print(f"[System] Using GPUs: {other_gpus} (excluding GPU 0 for rollout server)")
-        else:
-            print(f"[Warning] Only 1 GPU available. GRPO training will use GPU 0, which may conflict with rollout server.")
-            os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    except Exception as e:
-        print(f"[Warning] Failed to detect GPU count: {e}. Using default GPU allocation.")
-        # 如果检测失败，默认使用 GPU 1,2,3（假设至少有 4 个 GPU）
-        os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+    """启动 GRPO 训练"""
     
     rank, local_rank, world_size, local_world_size = get_dist_setting()
     print(f"[System] Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}, Local World Size: {local_world_size}")
