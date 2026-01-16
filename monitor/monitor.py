@@ -20,6 +20,11 @@ elif PLATFORM == "nvidia":
 else:
     raise ValueError(f"Unsupported platform: {PLATFORM}")
 
+
+LOG_CSV_HEADERS = ["timestamp", "gpu_id", "gpu_utilization", "memory_utilization", "temperature"]
+EVENT_CSV_HEADERS = ["timestamp", "gpu_id", "step", "event_type"]
+
+
 class Monitor:
     def __init__(
         self,
@@ -71,13 +76,7 @@ class Monitor:
         with open(self._output_file_path, "w", newline="") as file:
             writer = csv.writer(file)
             writer.writerow(
-                [
-                    "timestamp",
-                    "gpu_id",
-                    "gpu_utilization",
-                    "memory_utilization",
-                    "temperature",
-                ]
+                LOG_CSV_HEADERS
             )
 
     def _initialize_events_log_file(self):
@@ -86,7 +85,7 @@ class Monitor:
             return
         with open(self._events_file_path, "w", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(["timestamp", "event_type"])
+            writer.writerow(EVENT_CSV_HEADERS)
 
     def _monitor_loop(self):
         if not self._enable_metrics:
@@ -154,7 +153,14 @@ class Monitor:
         with open(self._events_file_path, "a", newline="") as file:
             writer = csv.writer(file)
             for row in self._pending_events:
-                writer.writerow([row["timestamp"], row["event_type"]])
+                writer.writerow(
+                    [
+                        row["timestamp"],
+                        row["gpu_id"],
+                        row["step"],
+                        row["event_type"],
+                    ]
+                )
         self._pending_events.clear()
 
     def start(self):
@@ -202,18 +208,22 @@ class Monitor:
         with self._lock:
             return [row.copy() for row in self._latest_by_gpu.values()]
 
-    def add_event(self, event_type):
+    def add_event(self, event_type, step=None, gpu_id=None):
         ts = time.time()
         with self._lock:
             self._events_buffer.append(
                 {
                     "timestamp": ts,
+                    "gpu_id": gpu_id,
+                    "step": step,
                     "event_type": event_type,
                 }
             )
             self._pending_events.append(
                 {
                     "timestamp": ts,
+                    "gpu_id": gpu_id,
+                    "step": step,
                     "event_type": event_type,
                 }
             )

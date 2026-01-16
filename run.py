@@ -5,12 +5,26 @@ import sys
 
 sys.path.insert(0, os.path.abspath("./ms-swift"))
 
+# Setup GPU environment based on command line arguments
+def setup_gpu_env():
+    if "--rollout" in sys.argv:
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+        print("[Setup] Configured for ROLLOUT: GPU 0")
+    elif "--grpo" in sys.argv:
+        # Default: except GPU 0
+        os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3' 
+        print("[Setup] Configured for TRAINING: GPU 1,2,3")
+
+setup_gpu_env()
+
+
 from swift.llm import RLHFArguments, RolloutArguments, rlhf_main, rollout_main
 from swift.trainers.rlhf_trainer import GRPOTrainer
 from swift.utils.env import get_dist_setting
 
 from macro import Event
 from monitor.monitor import Monitor
+from plugin import monkey_patch
 
 # --- Configuration ---
 PLATFORM = os.getenv("PLATFORM", "nvidia")
@@ -26,46 +40,6 @@ DEFAULT_EVENT_LIMIT = 200
 DEFAULT_MONITOR_INTERVAL_SECONDS = MONITOR_INTERVAL_MS / 1000
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-def monkey_patch(monitor: Monitor | None):
-    """Wrap GRPOTrainer to inject monitor."""
-    target_method = "_generate_and_score_completions"
-
-    original_method = getattr(GRPOTrainer, target_method)
-    setattr(GRPOTrainer, f"_original_{target_method}", original_method)
-
-    @functools.wraps(getattr(GRPOTrainer, f"_original_{target_method}"))
-    def patched_generate(self, *args, **kwargs):
-        # [EVENT: 生成开始]
-        if monitor:
-            monitor.add_event(Event.INFERENCE_START)
-
-        result = getattr(GRPOTrainer, f"_original_{target_method}")(
-            self, *args, **kwargs
-        )
-
-        # [EVENT: 生成结束]
-        if monitor:
-            monitor.add_event(Event.INFERENCE_END)
-            monitor.add_event(Event.TRAINING_START)
-
-        return result
-
-    setattr(GRPOTrainer, target_method, patched_generate)
-    print(f"[MonkeyPatch] Successfully patched GRPOTrainer.{target_method}")
-
-    if not hasattr(GRPOTrainer, "_original_training_step"):
-        GRPOTrainer._original_training_step = GRPOTrainer.training_step  # pyright: ignore[reportAttributeAccessIssue]
-
-    @functools.wraps(GRPOTrainer._original_training_step)  # pyright: ignore[reportAttributeAccessIssue]
-    def patched_step(self, *args, **kwargs):
-        res = GRPOTrainer._original_training_step(self, *args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]
-        if monitor:
-            monitor.add_event(Event.TRAINING_END)
-        return res
-
-    GRPOTrainer.training_step = patched_step
-
 
 # --- Configuration ---
 MODEL_PATH = "models/Qwen/Qwen3-0.6B"
@@ -96,7 +70,7 @@ def start_rollout_server():
     rollout_main(rollout_args)
 
 
-def start_grpo_training():
+def start_grpo_training(log_dir="logs/grpo_experiment"):
     """启动 GRPO 训练（使用除 GPU 0 外的其他 GPU）"""
     # 获取所有 GPU 数量，排除 GPU 0，使用其他 GPU
     # 注意：这里需要先初始化 NVML 来获取 GPU 数量
@@ -128,7 +102,7 @@ def start_grpo_training():
     # 它会通过 NVML 直接访问所有 GPU，所以可以看到 GPU 0（rollout 使用）和其他 GPU（训练使用）
     monitor = None
     if is_master:
-        output_dir = "logs/grpo_experiment_v1"
+        output_dir = log_dir
         os.makedirs(output_dir, exist_ok=True)
 
         print(f"[System] Starting Custom GPU Monitor...")
@@ -179,7 +153,7 @@ def start_grpo_training():
         torch_dtype="float16",
         device_map=None,
         dataset=["AI-MO/NuminaMath-TIR#1000"],
-        output_dir="output/grpo_experiment_v1",
+        output_dir=output_dir,
         # Training hyperparameters
         load_from_cache_file=True,
         split_dataset_ratio=0,
@@ -245,13 +219,19 @@ Examples:
         action="store_true",
         help="Start GRPO training (requires vLLM server to be running)",
     )
+    parser.add_argument(
+        "log_dir",
+        type=str,
+        default="logs/grpo_experiment",
+        help="Directory to save GRPO training logs",
+    )
 
     args = parser.parse_args()
 
     if args.rollout:
         start_rollout_server()
     elif args.grpo:
-        start_grpo_training()
+        start_grpo_training(log_dir=args.log_dir)
     else:
         parser.print_help()
         sys.exit(1)
