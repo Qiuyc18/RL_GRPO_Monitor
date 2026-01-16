@@ -75,31 +75,30 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
     
     rank, local_rank, world_size, local_world_size = get_dist_setting()
     print(f"[System] Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}, Local World Size: {local_world_size}")
-    is_master = rank == 0
 
     # Start monitoring
     # 注意：Monitor 会监控所有物理 GPU（不受 CUDA_VISIBLE_DEVICES 影响）
     # 它会通过 NVML 直接访问所有 GPU，所以可以看到 GPU 0（rollout 使用）和其他 GPU（训练使用）
     monitor = None
-    if is_master:
-        output_dir = log_dir
-        os.makedirs(output_dir, exist_ok=True)
 
-        print(f"[System] Starting Custom GPU Monitor...")
-        print(f"[System] Monitor will track ALL physical GPUs (including GPU 0 used by rollout server)")
-        monitor = Monitor(
-            platform="nvidia",
-            output_file_path=os.path.join(output_dir, "gpu_metrics.csv"),
-            events_file_path=os.path.join(output_dir, "gpu_events.csv"),
-            interval=DEFAULT_MONITOR_INTERVAL_SECONDS,
-            enable_metrics=True,
-        )
-        monitor.start()
+    output_dir = log_dir
+    os.makedirs(output_dir, exist_ok=True)
+    metrics_file = os.path.join(log_dir, f"gpu_metrics_rank.csv")
+    events_file = os.path.join(log_dir, f"gpu_events_rank_{rank}.csv")
 
-    if is_master:
-        monkey_patch(monitor)
-    else:
-        monkey_patch(None)
+    print(f"[System][Rank {rank}] Starting Monitor -> {events_file}")
+    do_enable_metrics = (rank == 0)
+
+    monitor = Monitor(
+        platform="nvidia",
+        output_file_path=metrics_file,
+        events_file_path=events_file,
+        interval=DEFAULT_MONITOR_INTERVAL_SECONDS,
+        enable_metrics=do_enable_metrics,
+    )
+    monitor.start()
+
+    monkey_patch(monitor)
 
     # --- Define DeepSpeed ZeRO-2 configuration ---
     ds_config_dict = {
@@ -163,8 +162,10 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
     )
 
     # Start training
-    print(f"[System] Connecting to vLLM server at {VLLM_SERVER_HOST}:{VLLM_SERVER_PORT}...")
-    print(f"[System] Starting GRPO training...")
+    if rank == 0:
+        print(f"[System] Connecting to vLLM server at {VLLM_SERVER_HOST}:{VLLM_SERVER_PORT}...")
+        print(f"[System] Starting GRPO training...")
+
     try:
         rlhf_main(args)
     except Exception as e:
@@ -200,7 +201,7 @@ Examples:
         help="Start GRPO training (requires vLLM server to be running)",
     )
     parser.add_argument(
-        "log_dir",
+        "--log_dir",
         type=str,
         default="logs/grpo_experiment",
         help="Directory to save GRPO training logs",
