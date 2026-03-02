@@ -1,8 +1,23 @@
+import os
 import functools
 from macro import Event
 from monitor.monitor import Monitor
 from swift.trainers.rlhf_trainer import GRPOTrainer
 from swift.utils.env import get_dist_setting
+
+
+def get_physical_gpu_id(local_rank: int) -> int:
+    """从 CUDA_VISIBLE_DEVICES + local_rank 得到物理 GPU 编号，供 TensorBoard/事件与 NVML 一致。"""
+    if local_rank < 0:
+        local_rank = 0
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not visible:
+        return local_rank
+    parts = [p.strip() for p in visible.split(",") if p.strip()]
+    if local_rank < len(parts):
+        return int(parts[local_rank])
+    return local_rank
+
 
 def monkey_patch(monitor: Monitor | None):
     """Wrap GRPOTrainer to inject detailed monitor events."""
@@ -15,29 +30,39 @@ def monkey_patch(monitor: Monitor | None):
     original_generate_method = getattr(GRPOTrainer, target_generate_method)
     
     _, local_rank, _, _ = get_dist_setting()
+    physical_gpu_id = get_physical_gpu_id(local_rank)
 
     @functools.wraps(original_generate_method)
     def patched_generate_and_score(self, *args, **kwargs):
         # [Event: 开始等待 vLLM 生成]
-        # 注意：这里其实包含了 "生成" + "评分" 两个动作
-        # 如果要拆得更细，需要看 ms-swift 源码中具体的 llm.generate 调用
         if monitor:
-            monitor.add_event(Event.VLLM_WAIT_START, gpu_id=local_rank)
+            monitor.add_event(Event.VLLM_WAIT_START, gpu_id=physical_gpu_id)
 
-        # 执行原始生成与评分
         result = original_generate_method(self, *args, **kwargs)
 
-        # [Event: 生成与评分结束]
         if monitor:
-            monitor.add_event(Event.VLLM_WAIT_END, gpu_id=local_rank)
-            # 在这里，数据已经回到 Training GPU，准备开始处理
-            # 我们可以标记一个 "数据准备/Tokenize" 的虚拟阶段，
-            # 因为 GRPO Trainer 紧接着就会把这些 text 转成 tensor
-            monitor.add_event(Event.TOKENIZE_START, gpu_id=local_rank)
+            monitor.add_event(Event.VLLM_WAIT_END, gpu_id=physical_gpu_id)
+            monitor.add_event(Event.TOKENIZE_START, gpu_id=physical_gpu_id)
 
         return result
 
     setattr(GRPOTrainer, target_generate_method, patched_generate_and_score)
+
+    # --- 1.1 Patch Reward 计算 (_score_completions 在 _generate_and_score_completions 内、generate 之后调用) ---
+    target_score_method = "_score_completions"
+    if hasattr(GRPOTrainer, target_score_method):
+        original_score_method = getattr(GRPOTrainer, target_score_method)
+
+        @functools.wraps(original_score_method)
+        def patched_score_completions(self, *args, **kwargs):
+            if monitor:
+                monitor.add_event(Event.REWARD_CALC_START, gpu_id=physical_gpu_id)
+            result = original_score_method(self, *args, **kwargs)
+            if monitor:
+                monitor.add_event(Event.REWARD_CALC_END, gpu_id=physical_gpu_id)
+            return result
+
+        setattr(GRPOTrainer, target_score_method, patched_score_completions)
 
     # --- 2. Patch Compute Loss (Forward Pass) ---
     # compute_loss 是 Training Loop 中 Forward 阶段的核心
@@ -50,17 +75,14 @@ def monkey_patch(monitor: Monitor | None):
         # [Event: Tokenize 结束 (因为进入 compute_loss 前数据必须这就绪)]
         # [Event: Forward 开始]
         if monitor:
-            monitor.add_event(Event.TOKENIZE_END, gpu_id=local_rank) 
-            monitor.add_event(Event.FORWARD_START, gpu_id=local_rank)
-        
-        # 执行 Forward
+            monitor.add_event(Event.TOKENIZE_END, gpu_id=physical_gpu_id)
+            monitor.add_event(Event.FORWARD_START, gpu_id=physical_gpu_id)
+
         result = GRPOTrainer._original_compute_loss(self, model, inputs, return_outputs, num_items_in_batch) # type: ignore
-        
-        # [Event: Forward 结束]
+
         if monitor:
-            monitor.add_event(Event.FORWARD_END, gpu_id=local_rank)
-            # Forward 结束紧接着就是 Backward，我们在这里标记 Backward 开始
-            monitor.add_event(Event.BACKWARD_START, gpu_id=local_rank)
+            monitor.add_event(Event.FORWARD_END, gpu_id=physical_gpu_id)
+            monitor.add_event(Event.BACKWARD_START, gpu_id=physical_gpu_id)
             
         return result
 
@@ -79,8 +101,7 @@ def monkey_patch(monitor: Monitor | None):
         res = GRPOTrainer._original_training_step(self, *args, **kwargs) # type: ignore
         
         if monitor:
-            # 当 training_step 返回时，Backward 和 Optimizer step 都做完了
-            monitor.add_event(Event.BACKWARD_END, gpu_id=local_rank)
+            monitor.add_event(Event.BACKWARD_END, gpu_id=physical_gpu_id)
             
         return res
 

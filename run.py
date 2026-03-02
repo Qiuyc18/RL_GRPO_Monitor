@@ -24,7 +24,8 @@ from swift.utils.env import get_dist_setting
 
 from macro import Event
 from monitor.monitor import Monitor
-from plugin import monkey_patch
+from plugin import get_physical_gpu_id, monkey_patch
+from plugin_rollout import monkey_patch_rollout
 
 # --- Configuration ---
 PLATFORM = os.getenv("PLATFORM", "nvidia")
@@ -38,6 +39,7 @@ DEFAULT_PLOT_WINDOW_SECONDS = 30
 DEFAULT_MAX_GPU_CHOICES = 8
 DEFAULT_EVENT_LIMIT = 200
 DEFAULT_MONITOR_INTERVAL_SECONDS = MONITOR_INTERVAL_MS / 1000
+TB_TIME_ANCHOR_PATH = os.path.join(LOG_DIRECTORY, ".time_anchor")
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -48,26 +50,46 @@ VLLM_SERVER_PORT = 8000
 VLLM_SERVER_HOST = "127.0.0.1"
 
 
-def start_rollout_server():
-    """启动 vLLM rollout 服务器（使用 GPU 0）"""
-    # 设置只使用 GPU 0
+def start_rollout_server(log_dir="logs/rollout_experiment"):
+    """启动 vLLM rollout 服务器"""
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    
+
+    rollout_log_dir = log_dir
+    os.makedirs(rollout_log_dir, exist_ok=True)
+    rollout_metrics_file = os.path.join(rollout_log_dir, "gpu_metrics.csv")
+    rollout_events_file = os.path.join(rollout_log_dir, "gpu_events.csv")
+
+    monitor = Monitor(
+        platform="nvidia",
+        output_file_path=rollout_metrics_file,
+        events_file_path=rollout_events_file,
+        interval=DEFAULT_MONITOR_INTERVAL_SECONDS,
+        enable_metrics=True,
+        my_physical_gpu_id=0,
+        is_main_for_tb=True,
+        write_metrics_csv=True,
+        rollout_gpu_ids=(0,),
+        tb_time_anchor_path=TB_TIME_ANCHOR_PATH,
+    )
+    monitor.start()
+    monkey_patch_rollout(monitor)
+
     print(f"[System] Starting vLLM rollout server on GPU 0...")
     print(f"[System] Model: {MODEL_PATH}")
     print(f"[System] Port: {VLLM_SERVER_PORT}")
     print(f"[System] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
-    
+    print(f"[System] Rollout Monitor -> {rollout_log_dir}")
+
     rollout_args = RolloutArguments(
         model=MODEL_PATH,
         port=VLLM_SERVER_PORT,
         torch_dtype="float16",
-        # vllm_tensor_parallel_size=1,
-        # vllm_data_parallel_size=1,
     )
-    
-    # 启动服务器并保持运行
-    rollout_main(rollout_args)
+
+    try:
+        rollout_main(rollout_args)
+    finally:
+        monitor.stop()
 
 
 def start_grpo_training(log_dir="logs/grpo_experiment"):
@@ -75,6 +97,7 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
     
     rank, local_rank, world_size, local_world_size = get_dist_setting()
     print(f"[System] Rank: {rank}, Local Rank: {local_rank}, World Size: {world_size}, Local World Size: {local_world_size}")
+    physical_gpu_id = get_physical_gpu_id(local_rank)
 
     # Start monitoring
     # 注意：Monitor 会监控所有物理 GPU（不受 CUDA_VISIBLE_DEVICES 影响）
@@ -82,12 +105,15 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
     monitor = None
 
     output_dir = log_dir
-    os.makedirs(output_dir, exist_ok=True)
-    metrics_file = os.path.join(log_dir, f"gpu_metrics_rank.csv")
-    events_file = os.path.join(log_dir, f"gpu_events_rank_{rank}.csv")
 
-    print(f"[System][Rank {rank}] Starting Monitor -> {events_file}")
-    do_enable_metrics = (rank == 0)
+    os.makedirs(log_dir, exist_ok=True)
+    metrics_file = os.path.join(log_dir, f"gpu_metrics_rank.csv")
+    events_file = os.path.join(log_dir, f"gpu_events_rank_{physical_gpu_id}.csv")
+    if os.path.exists(events_file):
+        raise FileExistsError(f"[Error] Events file {events_file} already exists, please use a different log directory")
+
+    print(f"[System][Physical GPU {physical_gpu_id}] Starting Monitor -> {events_file}")
+    do_enable_metrics = True
 
     monitor = Monitor(
         platform="nvidia",
@@ -95,6 +121,11 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
         events_file_path=events_file,
         interval=DEFAULT_MONITOR_INTERVAL_SECONDS,
         enable_metrics=do_enable_metrics,
+        my_physical_gpu_id=physical_gpu_id,
+        is_main_for_tb=(rank == 0),
+        write_metrics_csv=(rank == 0),
+        rollout_gpu_ids=(0,),
+        tb_time_anchor_path=TB_TIME_ANCHOR_PATH,
     )
     monitor.start()
 
@@ -178,6 +209,7 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
 
 
 def main():
+    import datetime
     parser = argparse.ArgumentParser(
         description="GRPO Training Script with vLLM Support",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -203,14 +235,14 @@ Examples:
     parser.add_argument(
         "--log_dir",
         type=str,
-        default="logs/grpo_experiment",
+        default=f"logs/grpo_experiment_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
         help="Directory to save GRPO training logs",
     )
 
     args = parser.parse_args()
 
     if args.rollout:
-        start_rollout_server()
+        start_rollout_server(log_dir=args.log_dir)
     elif args.grpo:
         start_grpo_training(log_dir=args.log_dir)
     else:

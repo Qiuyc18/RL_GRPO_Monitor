@@ -51,7 +51,7 @@ ln -s /etc/moreh/checkpoint/Qwen ./models/
 ```bash
 # 在 GPU0 上部署 vllm rollout
 python run.py --rollout
-# 在另一个窗口：使用 torchrun 运行训练，会调用剩下的几个 GPU 进行训练
+# 在另一个窗口：使用 torchrun 运行训练，会调用剩下的几个 GPU 进行训练（指定数量）
 uv run torchrun \
     --nproc_per_node=3 \
     --master_port=29500 \
