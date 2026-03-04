@@ -26,6 +26,7 @@ from macro import Event
 from monitor.monitor import Monitor
 from plugin import get_physical_gpu_id, monkey_patch
 from plugin_rollout import monkey_patch_rollout
+from rollout_stats import RolloutStatsRecorder
 
 # --- Configuration ---
 PLATFORM = os.getenv("PLATFORM", "nvidia")
@@ -129,7 +130,10 @@ def start_grpo_training(log_dir="logs/grpo_experiment"):
     )
     monitor.start()
 
-    monkey_patch(monitor)
+    # Rollout 长度统计（独立于 PhaseEvent，输出到单独 CSV）
+    rollout_recorder = RolloutStatsRecorder(output_dir=log_dir, gpu_id=physical_gpu_id)
+
+    monkey_patch(monitor, rollout_recorder=rollout_recorder)
 
     # --- Define DeepSpeed ZeRO-2 configuration ---
     ds_config_dict = {
