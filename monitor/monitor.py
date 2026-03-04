@@ -29,18 +29,17 @@ else:
 
 
 LOG_CSV_HEADERS = ["timestamp", "gpu_id", "gpu_utilization", "memory_utilization", "temperature"]
-EVENT_CSV_HEADERS = ["timestamp", "gpu_id", "step", "event_type"]
+EVENT_CSV_HEADERS = ["timestamp", "gpu_id", "step", "event_type", "mode", "role"]
 
-# --- 状态映射：Rollout 卡 / Trainer 卡两套，用于 TensorBoard 阶梯图 ---
 ROLLOUT_STATE_MAP = {
     "IDLE": 0,
-    "GENERATE": 1,
+    "ROLLOUT_PHASE": 1,
     "PREPARE": 2,
 }
 TRAINER_STATE_MAP = {
     "IDLE": 0,
-    "VLLM_WAIT": 1,
-    "TOKENIZE": 2,
+    "ROLLOUT_PHASE": 1,
+    "BATCH_PREP": 2,
     "REWARD": 3,
     "FORWARD": 4,
     "BACKWARD": 5,
@@ -252,13 +251,14 @@ class Monitor:
                         row["gpu_id"],
                         row["step"],
                         row["event_type"],
+                        row.get("mode", ""),
+                        row.get("role", ""),
                     ]
                 )
         self._pending_events.clear()
 
     def _update_gpu_state(self, gpu_id, event_str, role):
-        """按 role 更新 Rollout 或 Trainer 状态高度。role 为 'rollout' 或 'trainer'。"""
-        from macro import RolloutEvent, TrainerEvent
+        """按 role 更新 Rollout 或 Trainer 状态。role 为 'rollout' 或 'trainer'。"""
         event_name = str(event_str).upper()
         new_state = 0
         state_map = ROLLOUT_STATE_MAP if role == "rollout" else TRAINER_STATE_MAP
@@ -274,11 +274,9 @@ class Monitor:
         else:
             self._trainer_state[gpu_id] = new_state
 
-    def add_event(self, event_type, step=None, gpu_id=None):
-        from macro import RolloutEvent, TrainerEvent
+    def add_event(self, event_type, step=None, gpu_id=None, mode=None, role=None):
         ts = time.time()
-        if gpu_id is not None:
-            role = "rollout" if isinstance(event_type, RolloutEvent) else "trainer"
+        if gpu_id is not None and role is not None:
             self._update_gpu_state(gpu_id, event_type, role)
 
         with self._lock:
@@ -287,12 +285,11 @@ class Monitor:
                 "gpu_id": gpu_id,
                 "step": step,
                 "event_type": str(event_type),
+                "mode": mode,
+                "role": role,
             }
             self._events_buffer.append(event_data)
             self._pending_events.append(event_data)
-            
-        # Only write to CSV when the buffer is full or the timer reaches
-        # But the TensorBoard state is captured in real-time in _monitor_loop
         self._flush_pending_events()
 
     def start(self):
