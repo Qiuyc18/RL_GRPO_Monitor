@@ -77,7 +77,8 @@ def _read_recent_events(limit):
                 ts = float(row[0])
             except ValueError:
                 continue
-            rows.append({"timestamp": ts, "event_type": row[1]})
+            event_type = row[3] if len(row) > 3 else row[1]
+            rows.append({"timestamp": ts, "event_type": event_type})
     df = pd.DataFrame(rows)
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s").dt.round("ms")
