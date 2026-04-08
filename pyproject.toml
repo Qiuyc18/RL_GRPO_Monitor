@@ -1,21 +1,23 @@
 [project]
-name = "rl-llm"
+name = "rl-grpo-monitor"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reusable GPU and phase monitor for RL/GRPO training"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "numpy",
     "gradio",
     "pandas",
     "plotly",
-    "dotenv",
-    "nvidia-ml-py",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+nvidia = ["nvidia-ml-py"]
+amd = ["amdsmi"]
+data = [
+    "datasets",
     "huggingface_hub>=0.34.0,<1.0",
-    "accelerate",
-    "msgspec",
-    "deepspeed>=0.18.4",
-    "vllm>=0.13.0",
-    "math-verify>=0.9.0",
 ]
 
 [[tool.uv.index]]

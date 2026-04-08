@@ -1,5 +1,2 @@
 -r requirements-common.txt
-torch
-torchvision
-torchaudio
-vllm
+nvidia-ml-py

@@ -317,25 +317,41 @@ class Monitor:
             
     # ... (Keep update_interval, get_recent_rows, etc. unchanged) ...
     def update_interval(self, interval):
-       if interval is None or interval <= 0:
-           return
-       with self._lock:
-           self._interval = interval
-           buffer_maxlen = int(self._buffer_seconds / self._interval)
-           if buffer_maxlen <= 0:
-               buffer_maxlen = 1
-           self._metrics_buffer = deque(self._metrics_buffer, maxlen=buffer_maxlen)
-           self._events_buffer = deque(self._events_buffer, maxlen=buffer_maxlen)
+        if interval is None or interval <= 0:
+            return
+        with self._lock:
+            self._interval = interval
+            buffer_maxlen = int(self._buffer_seconds / self._interval)
+            if buffer_maxlen <= 0:
+                buffer_maxlen = 1
+            self._metrics_buffer = deque(self._metrics_buffer, maxlen=buffer_maxlen)
+            self._events_buffer = deque(self._events_buffer, maxlen=buffer_maxlen)
 
     def get_recent_rows(self, window_seconds=None):
-       if window_seconds is None:
-           window_seconds = self._buffer_seconds
-       cutoff = time.time() - window_seconds
-       with self._lock:
-           return [
-               row.copy() for row in self._metrics_buffer if row["timestamp"] >= cutoff
-           ]
+        if window_seconds is None:
+            window_seconds = self._buffer_seconds
+        cutoff = time.time() - window_seconds
+        with self._lock:
+            return [
+                row.copy() for row in self._metrics_buffer if row["timestamp"] >= cutoff
+            ]
 
     def get_gpu_choices(self):
-       with self._lock:
-           return self._collector.get_gpu_choices()
+        with self._lock:
+            return self._collector.get_gpu_choices()
+
+    def get_latest_snapshot(self):
+        with self._lock:
+            return [row.copy() for _, row in sorted(self._latest_by_gpu.items())]
+
+    def get_recent_events(self, window_seconds=None, limit=None):
+        if window_seconds is None:
+            window_seconds = self._buffer_seconds
+        cutoff = time.time() - window_seconds
+        with self._lock:
+            rows = [
+                row.copy() for row in self._events_buffer if row["timestamp"] >= cutoff
+            ]
+        if limit is not None:
+            return rows[-limit:]
+        return rows

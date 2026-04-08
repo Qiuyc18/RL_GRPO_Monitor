@@ -1,79 +1,115 @@
-# GRPO 训练流可视分析系统
+# RL/GRPO Monitor
 
-## 项目说明
-用于在 GRPO/RLHF 训练或推理过程中对 GPU 负载进行可视化监控，并尝试在时间轴上对齐训练事件与硬件指标。
+## 项目定位
+这个仓库现在的目标是做一个可复用的训练监控子模块，而不是绑定某个训练框架的整包工程。
 
-## 部署
+它提供两部分能力：
 
-- 首先确保安装了 uv，如果没装，使用下面这条命令安装
-    ```bash
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    ```
-    - 随后重启终端或者刷新一下 `~/.bashrc`
+- GPU 指标采集：按时间序列记录利用率、显存占用、温度
+- 阶段事件对齐：把 rollout、reward、forward、backward、optim step 等事件写到同一条时间轴
 
-- 安装环境
-    ```bash
-    chmod +x install.sh && bash install.sh
-    ```
+当前默认集成方向是 veRL 风格训练循环，`app.py` 保留为独立 Gradio UI。`ms-swift` 不再作为仓库内置子模块，只保留一个可选兼容适配层。
 
-- 新建文件 `.env` ，在 `.env` 中更新 HuggingFace Token
+## 当前结构
 
-- 下载子模块
-    ```bash
-    git submodule update --init --recursive
-    ```
+- `monitor/`
+  - 监控核心实现
+  - `monitor/events.py`：统一阶段事件定义
+  - `monitor/integrations/verl.py`：推荐的通用/veRL 事件桥接层
+  - `monitor/integrations/ms_swift.py`：旧的 ms-swift 兼容适配层，需外部自行安装 `swift`
+- `app.py`
+  - Gradio 实时监控面板
+- `run.py`
+  - 通用 smoke/demo 入口，用于验证事件与 GPU 指标是否正常落盘
+- `plugin.py`、`plugin_rollout.py`
+  - 保留旧文件名，内部改为兼容壳层
 
-## 下载模型
+## 安装
+
+先安装 `uv`：
 
 ```bash
-# 搜索模型
-python download.py search Qwen --limit 20
-
-# 下载模型（默认保存到 ./models/）
-python download.py download Qwen/Qwen2.5-1.5B-Instruct
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**服务器方式部署：**
+然后安装当前机器所需的最小依赖：
+
 ```bash
-# 1. 下载到临时目录
-python download.py download Qwen/Qwen2.5-1.5B-Instruct --local-dir tmp
-
-# 2. 移动到统一存放的目录
-sudo mv tmp /etc/moreh/checkpoint/Qwen/Qwen2.5-1.5B-Instruct
-
-# 3. 创建软链接
-ln -s /etc/moreh/checkpoint/Qwen ./models/
+chmod +x install.sh
+bash install.sh
 ```
 
-## 训练测试
-验证 grpo 能否正常跑起来
-- 测试脚本：`run.py`
+如果你只想把它作为其他项目的子模块使用，也可以直接在目标项目环境里安装：
+
 ```bash
-# 在 GPU0 上部署 vllm rollout
-python run.py --rollout
-# 在另一个窗口：使用 torchrun 运行训练，会调用剩下的几个 GPU 进行训练（指定数量）
-uv run torchrun \
-    --nproc_per_node=3 \
-    --master_port=29500 \
-    run.py --grpo
+uv pip install -e .
 ```
 
+按平台补充依赖：
 
-## 当前进度
-- **自动化训练与监控脚本**:
-    - 提供 `run.py` 脚本，可通过 `--rollout` 和 `--grpo` 参数一键启动 vLLM 服务和 GRPO 训练。
-    - **智能 GPU 分配**: 自动将 vLLM 推理服务部署在 GPU 0，GRPO 训练则使用所有其他剩余 GPU，实现资源隔离与高效利用。
-    - **集成的监控系统**: 训练启动时，自动运行监控模块，捕获所有物理 GPU 的关键指标（利用率、显存、功率、温度等）并存入 CSV。
-    - **关键事件捕获**: 通过对 `ms-swift` 中 `GRPOTrainer` 的动态修改 (Monkey Patching)，已能准确捕获 `推理开始/结束` 和 `训练开始/结束` 等核心事件，并与 GPU 指标在时间轴上对齐。
-- **数据准备与模型管理**:
-    - 提供通用的 `prepare_data.py` 脚本，支持从 Hugging Face Hub 搜索和下载数据集，并将其处理为 GRPO 训练所需的格式。
-    - 提供 `download.py` 脚本，方便地从 Hugging Face Hub 下载和管理模型。
-- **监控 UI**:
-    - 提供 Gradio 实时监控 UI（可调窗口、采样间隔、GPU 选择、暂停刷新）。
+- NVIDIA：安装 `nvidia-ml-py`
+- AMD：安装 `amdsmi`
 
-## 下一步计划
-- **更精细的事件捕获**: 在训练循环内部（如数据加载、前向/反向传播、梯度更新等）添加更详细的事件探针，以实现对训练阶段的微观分析。
-- **事件与 GPU 的精确绑定**: 在多卡训练环境下，确保每个事件都能明确关联到触发它的具体 GPU 设备。
-- **实时监控与训练联动**: 实现训练脚本启动时，能自动在后台打开并运行 `app.py` 监控仪表盘，方便实时观察。
-- **AMD ROCm 平台全面支持**: 将监控和训练脚本扩展至完全支持 AMD GPU，包括使用 `rocm_smi_lib` 进行指标收集和 `HIP_VISIBLE_DEVICES` 的等效设置。
-- **多节点训练支持**: 适配监控与启动脚本，以支持跨多个节点的大规模分布式训练。
+如果需要使用 `download.py` 或 `prepare_data.py`，再额外安装 `huggingface_hub` 和 `datasets`。
+
+## 快速验证
+
+1. 生成一份模拟训练日志：
+
+```bash
+python run.py --steps 5
+```
+
+2. 打开监控 UI：
+
+```bash
+python app.py
+```
+
+默认会在 `logs/` 下生成：
+
+- `gpu_metrics.csv`
+- `gpu_events.csv`
+- `rollout_samples*.csv`
+- `rollout_groups*.csv`
+
+## 作为子模块接入其他项目
+
+推荐接法是直接在训练循环里接 `VerlMonitorBridge`，而不是复用旧的框架启动脚本。
+
+```python
+from monitor import Monitor
+from monitor.integrations.verl import VerlMonitorBridge
+
+monitor = Monitor(
+    platform="nvidia",
+    output_file_path="logs/gpu_metrics.csv",
+    events_file_path="logs/gpu_events.csv",
+    interval=0.1,
+)
+monitor.start()
+
+bridge = VerlMonitorBridge.from_local_rank(monitor, local_rank=0, mode="verl")
+bridge.step_start(step=0)
+bridge.rollout_start(step=0)
+bridge.rollout_end(step=0)
+bridge.forward_start(step=0)
+bridge.forward_end(step=0)
+bridge.backward_start(step=0)
+bridge.backward_end(step=0)
+bridge.step_end(step=0)
+```
+
+如果你后面切到 veRL，只需要把这些事件打点插到你自己的 trainer / worker 循环里即可。
+
+## 兼容说明
+
+- 仓库已去掉对 `ms-swift` 子模块的默认依赖
+- `plugin.py` 和 `plugin_rollout.py` 仍然保留
+- 只有在你显式调用 `monitor.integrations.ms_swift` 里的补丁函数时，才会要求外部环境已经装好 `swift`
+
+## 后续建议
+
+- 把 veRL 中 actor / rollout / critic 的具体事件边界映射到 `PhaseEvent`
+- 如果需要多进程聚合，可在事件里补充 `worker_id` 或 `rank`
+- 如果以后要完全作为库分发，可以继续把根目录脚本收缩到 `examples/`

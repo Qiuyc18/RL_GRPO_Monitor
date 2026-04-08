@@ -21,3 +21,4 @@ echo "Installing dependencies from $REQUIREMENTS_FILE using uv..."
 uv pip install -r "$REQUIREMENTS_FILE"
 
 echo "Installation complete for $PLATFORM platform."
+echo "If you need dataset/model utilities, install extra deps manually: huggingface_hub datasets"

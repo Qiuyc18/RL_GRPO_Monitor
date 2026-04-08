@@ -12,3 +12,7 @@ results/
 rl_llm.egg-info/
 
 uv.lock
+/result
+/.trunk
+/docs
+/ms-swift/
