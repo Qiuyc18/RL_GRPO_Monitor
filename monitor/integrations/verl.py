@@ -1,13 +1,14 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from monitor.events import PhaseEvent
 
 from .base import emit_event, resolve_physical_gpu_id
 
-try:
+if TYPE_CHECKING:
     from monitor.rollout_stats import RolloutStatsRecorder
-except ImportError:  # pragma: no cover
-    RolloutStatsRecorder = None  # type: ignore
+else:  # pragma: no cover
+    RolloutStatsRecorder = Any
 
 
 @dataclass
