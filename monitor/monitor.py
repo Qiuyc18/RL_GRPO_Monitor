@@ -19,7 +19,7 @@ if __name__ == "__main__" and __package__ is None:
 import dotenv
 dotenv.load_dotenv()
 
-PLATFORM = os.getenv("PLATFORM", "nvidia")
+PLATFORM = os.getenv("GPU_PLATFORM") or os.getenv("PLATFORM", "nvidia")
 if PLATFORM == "amd":
     from monitor.monitor_gpu_amd import AMDMonitor
 elif PLATFORM == "nvidia":
